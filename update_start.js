@@ -1,7 +1,7 @@
 const db = require('./schema');
 
 const setStartMessage = db.prepare(`
-  INSERT OR IGNORE INTO scan_state (channel_id, last_message_id) 
+  INSERT OR REPLACE INTO scan_state (channel_id, last_message_id) 
   VALUES (?, ?)
 `);
 
