@@ -1,0 +1,196 @@
+const { Client, GatewayIntentBits } = require('discord.js');
+const { config } = require('dotenv');
+
+config();
+
+const TOKEN = process.env.BOT_TOKEN;
+const SIGNUP_CHANNELS = ['1247901833188478996','1274705683283054652']; 
+const YEEK_BOT_ID = '1374562166795010058';
+
+
+const db = require('./schema');
+
+// --- PREPARED STATEMENTS ---
+const getLastMessageId = db.prepare('SELECT last_message_id FROM scan_state WHERE channel_id = ?');
+const setLastMessageId = db.prepare('INSERT INTO scan_state (channel_id, last_message_id) VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_message_id = excluded.last_message_id');
+const isIgnored = db.prepare('SELECT 1 FROM ignored_terms WHERE term = ?');
+const getAlias = db.prepare('SELECT clean_string FROM aliases WHERE raw_string = ?');
+const insertPending = db.prepare('INSERT OR IGNORE INTO pending_terms (term) VALUES (?)');
+const countPending = db.prepare('SELECT COUNT(*) as count FROM pending_terms');
+
+const insertSignup = db.prepare(`
+  INSERT OR IGNORE INTO signups (message_id, user_id, raw_slot_string, clean_weapon_string, status) 
+  VALUES (?, ?, ?, ?, ?)
+`);
+
+const getPendingSignups = db.prepare("SELECT id, raw_slot_string FROM signups WHERE status = 'pending'");
+const updateResolvedSignup = db.prepare("UPDATE signups SET clean_weapon_string = ?, status = 'valid' WHERE id = ?");
+
+
+// --- PARSER LOGIC ---
+function parseLine(line) {
+  const match = line.match(/^\d+\.\s*(.*?)\s*<@!?(\d+)>/);
+  if (!match) return null;
+
+  const rawSlot = match[1].toLowerCase().trim();
+  const userId = match[2];
+
+  const parts = rawSlot.split(/\/|\bor\b/i).map(p => p.trim()).filter(Boolean);
+
+  const cleanParts = [];
+  const pendingTerms = [];
+
+  for (const part of parts) {
+    const cleanPart = part.replace(/\(.*?\)/g, '').trim(); 
+    if (!cleanPart) continue;
+
+    if (isIgnored.get(cleanPart)) continue; 
+
+    const aliasMatch = getAlias.get(cleanPart);
+    if (aliasMatch) {
+      cleanParts.push(aliasMatch.clean_string);
+    } else {
+      pendingTerms.push(cleanPart);
+    }
+  }
+
+  if (cleanParts.length === 0 && pendingTerms.length === 0) return null;
+
+  cleanParts.sort();
+  const cleanWeaponString = cleanParts.join('/');
+  const status = pendingTerms.length > 0 ? 'pending' : 'valid';
+
+  return { userId, rawSlot, cleanWeaponString, status, pendingTerms };
+}
+
+
+// --- SELF-HEALING REPROCESSOR ---
+function reprocessPendingSignups() {
+  console.log('Checking for pending signups to resolve...');
+  const pendingRows = getPendingSignups.all();
+
+  const resolveTransaction = db.transaction((rows) => {
+    let count = 0;
+    for (const row of rows) {
+      const mockLine = `1. ${row.raw_slot_string} <@000>`;
+      const parsed = parseLine(mockLine);
+      if (parsed && parsed.status === 'valid') {
+        updateResolvedSignup.run(parsed.cleanWeaponString, row.id);
+        count++;
+      }
+    }
+    return count; // return from inside, only visible after commit
+  });
+
+  const resolvedCount = resolveTransaction(pendingRows);
+  console.log(`Resolved ${resolvedCount} previously pending signups.`);
+
+  const stillPending = countPending.get();
+  console.log(`Pending terms still awaiting mapping: ${stillPending.count}`);
+}
+
+
+// --- MAIN SCANNER ---
+async function scanChannels(client) {
+  console.log('Starting execution of historical message parser...');
+  
+  reprocessPendingSignups();
+
+  for (const channelId of SIGNUP_CHANNELS) {
+    console.log(`Scanning channel ${channelId}...`);
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel) continue;
+
+      const stateRow = getLastMessageId.get(channelId);
+      let lastCheckedId = stateRow ? stateRow.last_message_id : null;
+      let totalProcessed = 0;
+      let hasMoreMessages = true;
+
+      while (hasMoreMessages) {
+        let options = { limit: 100 };
+        if (lastCheckedId) {
+          options.after = lastCheckedId;
+        }
+
+        let messages = await channel.messages.fetch(options);
+        if (messages.size === 0) {
+          hasMoreMessages = false;
+          break;
+        }
+
+        const sortedMessages = Array.from(messages.values()).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+        
+        const processBatchTransaction = db.transaction((msgArray, chanId) => {
+          let latestId = null;
+
+          for (const msg of msgArray) {
+            latestId = msg.id;
+            if (msg.author.id !== YEEK_BOT_ID) continue; // ← add this
+  
+              
+            const lines = msg.content.split('\n');
+            
+            for (const line of lines) {
+              const parsed = parseLine(line);
+              if (parsed) {
+                for (const term of parsed.pendingTerms) {
+                  insertPending.run(term);
+                }
+
+                const finalWeaponString = parsed.status === 'pending' ? null : parsed.cleanWeaponString;
+
+                insertSignup.run(
+                  msg.id, 
+                  parsed.userId, 
+                  parsed.rawSlot, 
+                  finalWeaponString,
+                  parsed.status
+                );
+              }
+            }
+ 
+          }
+
+          if (latestId) {
+            setLastMessageId.run(chanId, latestId);
+          }
+          
+          return latestId; 
+        });
+
+        lastCheckedId = processBatchTransaction(sortedMessages, channelId);
+        
+        totalProcessed += sortedMessages.length;
+        console.log(`Fetched and processed batch of ${sortedMessages.length}...`);
+      }
+
+      console.log(`Finished channel ${channelId}. Total new messages processed: ${totalProcessed}`);
+
+    } catch (error) {
+      console.error(`Error processing channel ${channelId}:`, error);
+      // Re-throw so the outer try/catch can cleanly exit the process
+      throw error; 
+    }
+  }
+
+  console.log('Scan completed successfully.');
+  process.exit(0);
+}
+
+
+// --- DISCORD CLIENT ---
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+});
+
+client.once('ready', async () => {
+  try {
+    await scanChannels(client);
+  } catch (err) {
+    console.error('Fatal error during scan execution:', err);
+    process.exit(1);
+  }
+});
+
+client.login(TOKEN);
