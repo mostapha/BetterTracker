@@ -31,7 +31,7 @@ const aliases = [
   ['mace', '1h mace'],
 
   ['hand of justice ', 'hand of justice'],
-  ['hoj ', 'hand of justice'],
+  ['hoj', 'hand of justice'],
 
 
   ['heavy mace', 'heavy mace'],
