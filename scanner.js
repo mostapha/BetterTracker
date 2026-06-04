@@ -27,6 +27,9 @@ const getPendingSignups = db.prepare("SELECT id, raw_slot_string FROM signups WH
 const updateResolvedSignup = db.prepare("UPDATE signups SET clean_weapon_string = ?, status = 'valid' WHERE id = ?");
 
 
+const ignoredTerms = new Set(db.prepare('SELECT term FROM ignored_terms').all().map(r => r.term));
+const aliasMap = new Map(db.prepare('SELECT raw_string, clean_string FROM aliases').all().map(r => [r.raw_string, r.clean_string]));
+
 // --- PARSER LOGIC ---
 function parseLine(line) {
   const match = line.match(/^\d+\.\s*(.*?)\s*<@!?(\d+)>/);
@@ -41,12 +44,14 @@ function parseLine(line) {
   const pendingTerms = [];
 
   for (const part of parts) {
-    const cleanPart = part.replace(/\(.*?\)/g, '').trim(); 
+    const cleanPart = part.replace(/\(.*?\)/g, '').replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim(); 
     if (!cleanPart) continue;
 
-    if (isIgnored.get(cleanPart)) continue; 
+    if (ignoredTerms.has(cleanPart)) continue; 
 
-    const aliasMatch = getAlias.get(cleanPart);
+    
+
+    const aliasMatch = aliasMap.get(cleanPart);
     if (aliasMatch) {
       cleanParts.push(aliasMatch.clean_string);
     } else {
