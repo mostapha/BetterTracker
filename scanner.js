@@ -13,8 +13,6 @@ const db = require('./schema');
 // --- PREPARED STATEMENTS ---
 const getLastMessageId = db.prepare('SELECT last_message_id FROM scan_state WHERE channel_id = ?');
 const setLastMessageId = db.prepare('INSERT INTO scan_state (channel_id, last_message_id) VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_message_id = excluded.last_message_id');
-const isIgnored = db.prepare('SELECT 1 FROM ignored_terms WHERE term = ?');
-const getAlias = db.prepare('SELECT clean_string FROM aliases WHERE raw_string = ?');
 const insertPending = db.prepare('INSERT OR IGNORE INTO pending_terms (term) VALUES (?)');
 const countPending = db.prepare('SELECT COUNT(*) as count FROM pending_terms');
 
