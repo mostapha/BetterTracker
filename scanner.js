@@ -49,7 +49,7 @@ function parseLine(line) {
 
     const aliasMatch = aliasMap.get(cleanPart);
     if (aliasMatch) {
-      cleanParts.push(aliasMatch.clean_string);
+      cleanParts.push(aliasMatch);
     } else {
       pendingTerms.push(cleanPart);
     }
