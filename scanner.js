@@ -17,8 +17,8 @@ const insertPending = db.prepare('INSERT OR IGNORE INTO pending_terms (term) VAL
 const countPending = db.prepare('SELECT COUNT(*) as count FROM pending_terms');
 
 const insertSignup = db.prepare(`
-  INSERT OR IGNORE INTO signups (message_id, user_id, raw_slot_string, clean_weapon_string, status) 
-  VALUES (?, ?, ?, ?, ?)
+  INSERT OR IGNORE INTO signups (message_id, user_id, raw_slot_string, clean_weapon_string, status, message_timestamp) 
+  VALUES (?, ?, ?, ?, ?, ?)
 `);
 
 const getPendingSignups = db.prepare("SELECT id, raw_slot_string FROM signups WHERE status = 'pending'");
@@ -42,12 +42,10 @@ function parseLine(line) {
   const pendingTerms = [];
 
   for (const part of parts) {
-    const cleanPart = part.replace(/\(.*?\)/g, '').replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim(); 
+    const cleanPart = part.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '').trim(); 
     if (!cleanPart) continue;
 
     if (ignoredTerms.has(cleanPart)) continue; 
-
-    
 
     const aliasMatch = aliasMap.get(cleanPart);
     if (aliasMatch) {
@@ -82,7 +80,7 @@ function reprocessPendingSignups() {
         count++;
       }
     }
-    return count; // return from inside, only visible after commit
+    return count;
   });
 
   const resolvedCount = resolveTransaction(pendingRows);
@@ -90,6 +88,31 @@ function reprocessPendingSignups() {
 
   const stillPending = countPending.get();
   console.log(`Pending terms still awaiting mapping: ${stillPending.count}`);
+}
+
+
+// --- USER STATS REBUILD ---
+// Recount everything from signups so user_stats is always correct,
+// even if scan_state was reset and messages were re-processed.
+//
+// Counts ALL signups per user (valid + pending).
+// first_seen / last_seen are derived from the signups timestamp column.
+function rebuildUserStats() {
+  console.log('Rebuilding user_stats from signups...');
+  db.exec(`
+    DELETE FROM user_stats;
+
+    INSERT INTO user_stats (user_id, signup_count, first_seen, last_seen)
+    SELECT
+      user_id,
+      COUNT(*) AS signup_count,
+      MIN(message_timestamp) AS first_seen,
+      MAX(message_timestamp) AS last_seen
+    FROM signups
+    GROUP BY user_id;
+  `);
+  const { count } = db.prepare('SELECT COUNT(*) as count FROM user_stats').get();
+  console.log(`user_stats rebuilt: ${count} users tracked.`);
 }
 
 
@@ -129,30 +152,30 @@ async function scanChannels(client) {
 
           for (const msg of msgArray) {
             latestId = msg.id;
-            if (msg.author.id !== YEEK_BOT_ID) continue; // ← add this
-  
+            if (msg.author.id !== YEEK_BOT_ID) continue;
               
             const lines = msg.content.split('\n');
+            const msgTimestamp = new Date(msg.createdTimestamp).toISOString();
             
             for (const line of lines) {
               const parsed = parseLine(line);
-              if (parsed) {
-                for (const term of parsed.pendingTerms) {
-                  insertPending.run(term);
-                }
+              if (!parsed) continue;
 
-                const finalWeaponString = parsed.status === 'pending' ? null : parsed.cleanWeaponString;
-
-                insertSignup.run(
-                  msg.id, 
-                  parsed.userId, 
-                  parsed.rawSlot, 
-                  finalWeaponString,
-                  parsed.status
-                );
+              for (const term of parsed.pendingTerms) {
+                insertPending.run(term);
               }
+
+              const finalWeaponString = parsed.status === 'pending' ? null : parsed.cleanWeaponString;
+
+              insertSignup.run(
+                msg.id, 
+                parsed.userId, 
+                parsed.rawSlot, 
+                finalWeaponString,
+                parsed.status,
+                msgTimestamp
+              );
             }
- 
           }
 
           if (latestId) {
@@ -172,12 +195,12 @@ async function scanChannels(client) {
 
     } catch (error) {
       console.error(`Error processing channel ${channelId}:`, error);
-      // Re-throw so the outer try/catch can cleanly exit the process
       throw error; 
     }
   }
 
   console.log('Scan completed successfully.');
+  rebuildUserStats();
   process.exit(0);
 }
 

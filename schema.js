@@ -19,7 +19,14 @@ db.exec(`
     clean_weapon_string TEXT,
     status TEXT DEFAULT 'valid',
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    message_timestamp DATETIME,
     UNIQUE(message_id, user_id, raw_slot_string) 
+  );
+  CREATE TABLE IF NOT EXISTS user_stats (
+    user_id TEXT PRIMARY KEY,
+    signup_count INTEGER DEFAULT 0,
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
